@@ -90,4 +90,4 @@ gcc -c hello_world.c
 cargo run ./test/hello_world.o
 ```
 
-![image-20230616133411412](e)
+![image-20230616133411412](https://img-1251565221.cos.ap-nanjing.myqcloud.com/img/image-20230616133411412.png)
