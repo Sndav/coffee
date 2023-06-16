@@ -2,7 +2,7 @@
 
 Coffee is a loader for ELF (Executable and Linkable Format) object files written in Rust. It provides a mechanism to load and parse ELF files similar to COFFLoader, but specifically designed for ELF files used in Unix-like systems.
 
-**Note: This project is currently under active development and only supports a subset of architectures at the moment. **
+**Note: This project is currently under active development and only supports a subset of architectures at the moment.**
 
 ## Features
 
@@ -90,4 +90,4 @@ gcc -c hello_world.c
 cargo run ./test/hello_world.o
 ```
 
-![image-20230616133411412](https://img-1251565221.cos.ap-nanjing.myqcloud.com/img/image-20230616133411412.png)
+![image-20230616133411412](e)
