@@ -1,4 +1,4 @@
-use std::{env, ffi::c_void, num::Wrapping, ptr, thread::sleep, time::Duration};
+use std::{env, ffi::c_void, ptr};
 use std::collections::HashMap;
 use std::mem::size_of;
 
@@ -20,11 +20,10 @@ use elf::relocation::Rel;
 use libc::mmap;
 use log::debug;
 use nix::errno::Errno;
-use nix::libc::{memcmp, mprotect, PROT_EXEC, PROT_READ, PROT_WRITE, strerror};
+use nix::libc::{PROT_EXEC, PROT_READ, PROT_WRITE};
 
 use crate::{
     function_table::{FunctionTable},
-    utils::{hexdump, show_mem_hexdump},
 };
 
 const MAX_NUM_EXTERNAL_FUNCTIONS: usize = 256;
@@ -451,7 +450,7 @@ impl<'data> Coffee<'data> {
 
                             let a = (encoding & 0x00_ff_ff_ff) << 2;
 
-                            let relative_offset = ((addr_s as i64 + addend as i64 - addr_p as i64)
+                            let relative_offset = ((addr_s as i64 + a as i64 - addr_p as i64)
                                 as i32)
                                 & 0x03ff_fffe;
 
@@ -722,7 +721,7 @@ impl<'data> Coffee<'data> {
             if sym_name == "go" {
                 let (addr, _) = self.get_symbol_addr(&sym)?;
                 debug!("go function found: {:x}", addr);
-                let section = self.sections.get(sym.st_shndx as usize).unwrap();
+                let _section = self.sections.get(sym.st_shndx as usize).unwrap();
 
                 let func = unsafe { std::mem::transmute::<_, fn() -> u64>(addr) };
 

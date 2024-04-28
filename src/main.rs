@@ -3,14 +3,9 @@ mod function_table;
 mod utils;
 
 use crate::coffee::Coffee;
-use elf::{
-    abi,
-    abi::{ET_REL, SHN_ABS, SHT_NULL},
-    endian::AnyEndian,
-    ElfBytes,
-};
-use log::{debug, error, info};
-use nix::libc::{malloc, memcmp};
+
+use log::{info};
+
 use std::{ffi::c_void, fs, path::Path};
 use std::env::args;
 
