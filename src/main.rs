@@ -9,7 +9,7 @@ use elf::{
     endian::AnyEndian,
     ElfBytes,
 };
-use log::{debug, info};
+use log::{debug, error, info};
 use nix::libc::{malloc, memcmp};
 use std::{ffi::c_void, fs, path::Path};
 use std::env::args;
@@ -28,7 +28,7 @@ fn execute_obj(path: &str) -> anyhow::Result<()> {
     coffee.register_functions();
     coffee.register_function("hello_world", hello_world as *const c_void);
     coffee.map_data()?;
-    coffee.relo_symbols()?;
+    coffee.reloc_symbols()?;
     coffee.execute()?;
 
     Ok(())
@@ -36,8 +36,12 @@ fn execute_obj(path: &str) -> anyhow::Result<()> {
 
 fn main() -> anyhow::Result<()> {
     simple_logger::SimpleLogger::new().env().init()?;
-    let file_pah = args().nth(1).expect("no file path");
-    execute_obj(&file_pah)?;
+    let file_pah = args().nth(1);
+    if file_pah.is_none() {
+        println!("USAGE: coffee [obj file path]");
+        return Ok(())
+    }
+    execute_obj(&file_pah.unwrap())?;
     Ok(())
 
 }

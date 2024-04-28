@@ -12,13 +12,14 @@ Coffee is a loader for ELF (Executable and Linkable Format) object files written
   - The loader provides the flexibility to customize the symbol resolution mechanism. You can define your own symbol resolution strategy based on your specific requirements. This allows you to handle symbol resolution in a way that best fits your project's needs.
 - Easy Addition of Built-in Functions
   - The loader allows easy addition of built-in functions, which can be called from within the loaded object files. You can extend the loader's functionality by adding new functions that are readily available for use in the object files. This simplifies the process of adding and invoking custom functions within the loaded ELF files.
-
+- Support GLIBC Look up
+  - The loader supports GLIBC look up for symbols. It can resolve symbols from the GLIBC library and provide access to the functions defined in the GLIBC library. This allows you to use GLIBC functions within the loaded object files without any additional configuration.
 ## Usage
 
 1. Clone the project
 
 ```bash
-git clone https://github.com/your/repo.git
+git clone https://github.com/Sndav/coffee
 ```
 
 2. Compile the C source file to `.o` file
@@ -41,12 +42,11 @@ cargo run <path_to_obj_file>
   - [x] R_X86_64_64
   - [x] R_X86_64_PC32
   - [x] R_X86_64_PLT32
-  - [ ] R_X86_64_GOT32
-  - [ ] R_X86_64_NONE
-  - [ ] R_X86_64_JUMP_SLOT
-- [ ] X86
-- [ ] ARM
-- [ ] ARM64
+- [x] X86
+  - [x] R_X86_64_64
+  - [x] R_X86_64_GOTPCREL
+- [x] ARM
+- [x] ARM64
 
 ## Advanced
 
@@ -90,4 +90,4 @@ gcc -c hello_world.c
 cargo run ./test/hello_world.o
 ```
 
-![image-20230616133411412](https://img-1251565221.cos.ap-nanjing.myqcloud.com/img/image-20230616133411412.png)
+![run.png](./images/run.png)

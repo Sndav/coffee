@@ -1,6 +1,6 @@
 void hello_world();
 
-int main(){
+int go(){
     hello_world();
     return 1;
 }

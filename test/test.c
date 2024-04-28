@@ -1,16 +1,13 @@
-void println(char *buf);
-void debugln(char *buf);
-void hello_world();
+#include<stdio.h>
 
 
 int test_func_call(unsigned char *buf){
-    println(buf);
+    puts(buf);
     return 0;
 }
 
-int main(){
+int go(){
     char *buf = "Hello World!";
-    debugln(buf);
-    hello_world();
+    test_func_call(buf)
     return 1;
 }
