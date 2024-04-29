@@ -2,6 +2,8 @@ mod coffee;
 mod function_table;
 mod utils;
 
+mod elf_const;
+
 use crate::coffee::Coffee;
 
 use log::{info};
@@ -20,12 +22,13 @@ fn execute_obj(path: &str) -> anyhow::Result<()> {
     let file_data = fs::read(obj_path)?;
 
     let mut coffee = Coffee::new(&file_data)?;
-    coffee.register_functions();
     coffee.register_function("hello_world", hello_world as *const c_void);
-    coffee.map_data()?;
-    coffee.reloc_symbols()?;
-    coffee.execute()?;
-
+    
+    let args = vec![
+        "coffee\0",
+        "hello_world\0",
+    ];
+    coffee.execute(args)?;
     Ok(())
 }
 

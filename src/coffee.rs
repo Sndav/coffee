@@ -1,5 +1,6 @@
 use std::{env, ffi::c_void, ptr};
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::mem::size_of;
 
 use anyhow::bail;
@@ -17,18 +18,19 @@ use elf::abi::{
     SHN_UNDEF, SHT_LOPROC, SHT_NOBITS, SHT_PROGBITS, SHT_REL, SHT_RELA,
 };
 use elf::relocation::Rel;
-use libc::mmap;
+use libc::{c_char, mmap};
 use log::debug;
 use nix::errno::Errno;
 use nix::libc::{PROT_EXEC, PROT_READ, PROT_WRITE};
 
-use crate::{
-    function_table::{FunctionTable},
-};
+use crate::{elf_const, function_table::{FunctionTable}};
+use crate::elf_const::R_386_GOTOFF;
 
 const MAX_NUM_EXTERNAL_FUNCTIONS: usize = 256;
 const PAGE_SIZE: usize = 4096;
 const MAX_SECTION_SIZE: usize = 8 * PAGE_SIZE;
+
+type GoFunc = extern "C" fn(argc: i32, argv: *const *const c_char) -> i32;
 
 pub struct Coffee<'data> {
     elf: ElfBytes<'data, AnyEndian>,
@@ -51,6 +53,10 @@ pub struct Coffee<'data> {
     // thunk trampoline
     thunk_offset: usize, // thunk offset
 
+    plt_table: HashMap<usize, u32>,
+    // PLT table
+    plt_ptr: usize, // PLT table start address
+
     got_table: HashMap<usize, u32>,
     // GOT table
     got_ptr: usize, // GOT table start address
@@ -58,6 +64,7 @@ pub struct Coffee<'data> {
     libc_handle: *mut c_void,
 }
 
+#[derive(Clone)]
 pub enum Reloc {
     Rela(Rela),
     Rel(Rel),
@@ -96,6 +103,7 @@ impl Reloc {
     }
 }
 
+#[derive(Clone)]
 pub struct SectionItem {
     pub start_address: usize,
     pub size: usize,
@@ -217,7 +225,7 @@ impl<'data> Coffee<'data> {
         let mem_pool = unsafe {
             mmap(
                 std::ptr::null_mut(),
-                MAX_SECTION_SIZE * (1 + shdrs.len()),
+                MAX_SECTION_SIZE * (2 + shdrs.len()), // need page for got and plt
                 PROT_READ | PROT_WRITE | PROT_EXEC,
                 libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
                 -1,
@@ -229,10 +237,10 @@ impl<'data> Coffee<'data> {
             bail!("mmap failed: {}", Errno::last());
         }
 
+        debug!("Memory Pool: {:p}", mem_pool);
+
         Ok(Coffee {
             elf,
-            mem_pool,
-            map_offset: MAX_SECTION_SIZE,
             sections: Vec::new(),
             sh_table: shdrs,
             sh_strtab,
@@ -240,8 +248,14 @@ impl<'data> Coffee<'data> {
             symtab,
             thunk_trampoline,
             thunk_offset,
-            got_ptr: mem_pool as usize,
+
+            mem_pool,
+            plt_ptr: mem_pool as usize,
+            plt_table: HashMap::new(),
+            got_ptr: mem_pool as usize + MAX_SECTION_SIZE,
             got_table: HashMap::new(),
+            map_offset: MAX_SECTION_SIZE * 2,
+
             func_table: FunctionTable::new(),
             libc_handle: unsafe { libc::dlopen("libc.so.6\x00".as_ptr() as _, libc::RTLD_LAZY) },
         })
@@ -253,7 +267,67 @@ impl<'data> Coffee<'data> {
         addr as *mut c_void
     }
 
-    pub fn map_data(&mut self) -> anyhow::Result<()> {
+
+    fn get_got_func_ptr(&mut self, func_ptr: usize) -> anyhow::Result<u32> {
+        let got_entry = match self.got_table.get(&func_ptr) {
+            Some(got_entry) => *got_entry,
+            None => {
+
+                let plt_entry = self.get_plt_func_ptr(func_ptr)?;
+                let plt_entry_addr = self.plt_ptr + (plt_entry as usize * self.thunk_trampoline.len());
+
+                let got_entry = self.got_table.len() as u32;
+                if got_entry >= MAX_NUM_EXTERNAL_FUNCTIONS as u32 {
+                    bail!("too many external functions");
+                }
+                self.got_table.insert(func_ptr, got_entry);
+
+                let got_offset = got_entry as usize * size_of::<usize>();
+                let got_entry_addr = self.got_ptr + got_offset;
+
+                unsafe {
+                    ptr::write_unaligned(got_entry_addr as *mut usize, plt_entry_addr);
+                }
+
+                got_entry
+            }
+        };
+        return Ok(got_entry);
+    }
+
+    fn get_plt_func_ptr(&mut self, func_ptr: usize) -> anyhow::Result<u32> {
+        let plt_entry = match self.plt_table.get(&func_ptr) {
+            Some(plt_entry) => *plt_entry,
+            None => {
+                let plt_entry = self.plt_table.len() as u32;
+                if plt_entry >= MAX_NUM_EXTERNAL_FUNCTIONS as u32 {
+                    bail!("too many external functions")
+                }
+                self.plt_table.insert(func_ptr, plt_entry);
+
+                let plt_offset = plt_entry as usize * self.thunk_trampoline.len();
+                let plt_entry_addr = self.plt_ptr + plt_offset;
+                let mut trampline = self.thunk_trampoline.clone();
+
+                trampline[self.thunk_offset..self.thunk_offset + size_of::<usize>()]
+                    .copy_from_slice(&(func_ptr.to_le_bytes())); // write function address to trampoline
+
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        trampline.as_ptr(),
+                        plt_entry_addr as *mut u8,
+                        trampline.len(),
+                    );
+                }
+                plt_entry
+            }
+        };
+        return Ok(plt_entry);
+    }
+
+
+
+    fn map_data(&mut self) -> anyhow::Result<()> {
         debug!("Number of Sections: {}", self.sh_table.len());
 
         for idx in 0..self.sh_table.len() {
@@ -312,6 +386,7 @@ impl<'data> Coffee<'data> {
         };
 
         debug!("Parse Relocation Section Type: 0x{:x}", sht_rel_type);
+        debug!("Number of Sections: {}", self.sh_table.len());
         for idx in 0..self.sh_table.len() {
             let section_header = self.sh_table.get(idx)?;
             let section_name = self.sh_strtab.get(section_header.sh_name as usize)?;
@@ -366,8 +441,9 @@ impl<'data> Coffee<'data> {
         Ok(())
     }
 
-    pub fn reloc_symbols(&mut self) -> anyhow::Result<()> {
-        for section in self.sections.iter() {
+    fn reloc_symbols(&mut self) -> anyhow::Result<()> {
+        let mut sections = self.sections.clone();
+        for section in sections.iter() {
             if section.reloc.is_empty() {
                 continue;
             }
@@ -376,105 +452,48 @@ impl<'data> Coffee<'data> {
                 let sym = self.symtab.get(reloc.r_sym())?;
                 let addr_p = section.start_address + reloc.r_offset();
                 let st_shndx_section = self.sections.get(sym.st_shndx as usize).unwrap();
-                let addr_s = st_shndx_section.start_address + sym.st_value as usize;
                 let addend = reloc.r_addend(addr_p);
                 let sym_name = self.strtab.get(sym.st_name as usize)?;
                 let r_type = reloc.r_type();
+                let mut addr_s = st_shndx_section.start_address + sym.st_value as usize;
+                let mut got_entry = 0;
+                let mut plt_entry = 0;
+                let mut got_entry_addr = 0;
+                let mut plt_entry_addr = 0;
 
                 debug!("Relocating Symbol: {}", sym_name);
                 debug!("\tSymbol Address: {:x}", addr_s);
+                debug!("\tSymbol Section: {}", sym.st_shndx);
                 debug!("\tRelocation Address: {:x}", addr_p);
                 debug!("\tAddend: {}", addend);
                 debug!("\tOffset: {}", reloc.r_offset());
                 debug!("\tType: {}", r_type);
 
-                if sym.st_shndx == SHN_UNDEF && r_type == R_X86_64_32 && cfg!(target_arch = "x86") {
-                    debug!("\tMode: R_X86_64_32");
-                    let offset = self.got_ptr as isize + addend - addr_p as isize;
-                    let target_addr = addr_p as *mut u32;
-                    unsafe {
-                        ptr::write_unaligned(target_addr, offset as u32);
-                    }
-                } else if sym.st_shndx == SHN_UNDEF && r_type != 0 {
+
+                // Undefined symbol
+                if sym.st_shndx == SHN_UNDEF {
+
                     debug!("\tMode: External Function");
-                    let func_ptr = self.load_symbol(sym_name)?;
-                    let got_entry = match self.got_table.get(&func_ptr) {
-                        Some(got_entry) => *got_entry,
-                        None => {
-                            let got_entry = self.got_table.len() as u32;
-                            if got_entry >= MAX_NUM_EXTERNAL_FUNCTIONS as u32 {
-                                bail!("too many external functions");
-                            }
-                            self.got_table.insert(func_ptr, got_entry);
-                            got_entry
-                        }
-                    };
+                    let func_ptr = self.load_external_symbol(sym_name)?;
+                    debug!("\t\tFunction Address: {:x}", func_ptr);
 
-                    let got_offset = got_entry as usize * self.thunk_trampoline.len();
-                    let got_entry_addr = self.got_ptr + got_offset;
-                    let mut trampline = self.thunk_trampoline.clone();
+                    // Map function address to GOT and PLT
+                    got_entry = self.get_got_func_ptr(func_ptr)?;
+                    plt_entry = self.get_plt_func_ptr(func_ptr)?;
 
-                    trampline[self.thunk_offset..self.thunk_offset + size_of::<usize>()]
-                        .copy_from_slice(&(func_ptr.to_le_bytes())); // write function address to trampoline
+                    plt_entry_addr = self.plt_ptr + (plt_entry as usize * self.thunk_trampoline.len());
+                    got_entry_addr = self.got_ptr + (got_entry as usize * size_of::<usize>());
 
-                    unsafe {
-                        ptr::copy_nonoverlapping(
-                            trampline.as_ptr(),
-                            got_entry_addr as *mut u8,
-                            trampline.len(),
-                        );
-                    }
+                    debug!("\t\tPLT Entry: {:x}", plt_entry);
+                    debug!("\t\tGOT Entry: {:x}", got_entry);
+                    debug!("\t\tPLT Entry Address: {:x}", plt_entry_addr);
+                    debug!("\t\tGOT Entry Address: {:x}", got_entry_addr);
 
-                    match env::consts::ARCH {
-                        "aarch64" => {
-                            assert!(r_type == R_AARCH64_CALL26 || r_type == R_AARCH64_JUMP26);
-                            let offset = ((got_entry_addr as isize + addend - addr_p as isize)
-                                as i32
-                                & 0x0fff_ffff)
-                                >> 2;
-                            let val = if r_type == R_AARCH64_CALL26 {
-                                0x94000000 | offset as u32
-                            } else {
-                                0x14000000 | offset as u32
-                            };
+                    addr_s = plt_entry_addr;
 
-                            let target_addr = addr_p as *mut u32;
-                            unsafe {
-                                ptr::write_unaligned(target_addr, val);
-                            }
-                        }
-                        "arm" => {
-                            // bail!("unsupported arch: {}", env::consts::ARCH);
-                            assert!(r_type == R_ARM_CALL || r_type == R_ARM_JUMP24);
-                            let encoding = unsafe { ptr::read_unaligned(addr_p as *const i32) };
+                }
 
-                            let a = (encoding & 0x00_ff_ff_ff) << 2;
-
-                            let relative_offset = ((addr_s as i64 + a as i64 - addr_p as i64)
-                                as i32)
-                                & 0x03ff_fffe;
-
-                            let opcode = if reloc.r_type() == abi::R_ARM_CALL {
-                                0xeb000000
-                            } else {
-                                0xea000000
-                            };
-
-                            let new_encoding = opcode | ((relative_offset >> 2) as u32);
-                            unsafe {
-                                ptr::write_unaligned(addr_p as *mut u32, new_encoding);
-                            }
-                        }
-                        _ => {
-                            let offset = got_entry_addr as isize + addend - addr_p as isize;
-                            let target_addr = addr_p as *mut i32;
-                            unsafe {
-                                ptr::write_unaligned(target_addr, offset as i32);
-                            }
-                        }
-                    }
-                } else if (section.reloc_header.sh_flags & SHF_INFO_LINK as u64) != 0
-                    && env::consts::ARCH == "aarch64"
+                if env::consts::ARCH == "aarch64"
                 {
                     debug!("\tMode: AARCH64 SHF_INFO_LINK");
                     match r_type {
@@ -508,7 +527,21 @@ impl<'data> Coffee<'data> {
                             }
                         }
                         abi::R_AARCH64_CALL26 | abi::R_AARCH64_JUMP26 => {
-                            bail!("unsupported relocation type: {}", r_type);
+                            debug!("\tMode: R_AARCH64_CALL26 | R_AARCH64_JUMP26");
+                            let offset = ((plt_entry_addr as isize + addend - addr_p as isize)
+                                as i32
+                                & 0x0fff_ffff)
+                                >> 2;
+                            let val = if r_type == R_AARCH64_CALL26 {
+                                0x94000000 | offset as u32
+                            } else {
+                                0x14000000 | offset as u32
+                            };
+
+                            let target_addr = addr_p as *mut u32;
+                            unsafe {
+                                ptr::write_unaligned(target_addr, val);
+                            }
                         }
                         abi::R_AARCH64_ABS64 => {
                             debug!("\tMode: R_AARCH64_ABS64");
@@ -584,9 +617,7 @@ impl<'data> Coffee<'data> {
                             bail!("unsupported relocation type: {}", r_type);
                         }
                     }
-                } else if (section.reloc_header.sh_flags & SHF_INFO_LINK as u64) != 0
-                    && env::consts::ARCH == "arm"
-                {
+                } else if env::consts::ARCH == "arm" {
                     match r_type {
                         abi::R_ARM_REL32 => {
                             debug!("\tMode: R_ARM_REL32");
@@ -606,7 +637,9 @@ impl<'data> Coffee<'data> {
                         R_ARM_CALL | R_ARM_JUMP24 => {
                             debug!("\tMode: R_ARM_CALL | R_ARM_JUMP24");
                             let encoding = unsafe { ptr::read_unaligned(addr_p as *const i32) };
+
                             let a = encoding & 0x00_ff_ff_ff << 2;
+
                             let relative_offset =
                                 ((addr_s as i64 + a as i64 - addr_p as i64) as i32) & 0x03ff_fffe;
 
@@ -623,18 +656,13 @@ impl<'data> Coffee<'data> {
                         }
                         abi::R_ARM_PREL31 => {
                             debug!("\tMode: R_ARM_PREL31");
-                            // let relative_offset = (addr_s as i64 + addend as i64 - addr_p as i64) as i32;
-                            // unsafe {
-                            //     ptr::write_unaligned(addr_p as *mut i32, relative_offset);
-                            // }
+                            todo!("R_ARM_PREL31")
                         }
                         _ => {
                             bail!("unsupported relocation type: {}", r_type);
                         }
                     }
-                } else if (section.reloc_header.sh_flags & SHF_INFO_LINK as u64) != 0
-                    && env::consts::ARCH == "x86_64"
-                {
+                } else if env::consts::ARCH == "x86_64" {
                     match r_type {
                         abi::R_X86_64_64 => {
                             debug!("\tMode: R_X86_64_64");
@@ -654,25 +682,31 @@ impl<'data> Coffee<'data> {
                                 ptr::write_unaligned(addr_p as *mut i32, relative_offset);
                             }
                         }
+                        abi::R_X86_64_GOTPCREL => {
+                            debug!("\tMode: R_X86_64_GOTPCREL");
+                            let relative_offset =
+                                (got_entry_addr as isize + addend - addr_p as isize) as i32;
+                            unsafe {
+                                ptr::write_unaligned(addr_p as *mut i32, relative_offset);
+                            }
+                        }
                         _ => {
                             bail!("unsupported relocation type: {}", r_type);
                         }
                     }
-                } else if (section.reloc_header.sh_flags & SHF_INFO_LINK as u64) != 0
-                    && env::consts::ARCH == "x86"
-                {
+                } else if env::consts::ARCH == "x86" {
                     match r_type {
-                        abi::R_X86_64_64 => {
-                            // R_X86_64_64 (0x1)
-                            debug!("\tMode: R_X86_64_64");
+                        elf_const::R_386_32 => {
+                            debug!("\tMode: R_386_32");
                             let addr = (addr_s as u64).wrapping_add(addend as u64);
                             unsafe {
                                 ptr::write_unaligned(addr_p as *mut usize, addr as usize);
                             }
                         }
-                        abi::R_X86_64_GOTPCREL => {
-                            // S + A - GOT
-                            debug!("\tMode: R_X86_64_GOTPCREL");
+                        R_386_GOTOFF => {
+                            // R_386_GOTOFF
+                            // S + A – GOT
+                            debug!("\tMode: R_386_GOTOFF");
                             let relative_offset =
                                 (addr_s as i64 + addend as i64 - self.got_ptr as i64) as i32;
                             unsafe {
@@ -689,17 +723,8 @@ impl<'data> Coffee<'data> {
         Ok(())
     }
 
-    pub fn get_symbol_addr(&self, sym: &Symbol) -> anyhow::Result<(usize, usize)> {
-        if sym.st_shndx == abi::SHN_UNDEF {
-            Ok((self.load_symbol(self.strtab.get(sym.st_name as usize)?)?, 0))
-        } else {
-            let section = self.sections.get(sym.st_shndx as usize).unwrap();
-            let sym_addr = section.start_address as usize + sym.st_value as usize;
-            Ok((sym_addr, sym.st_size as _))
-        }
-    }
 
-    pub fn load_symbol(&self, name: &str) -> anyhow::Result<usize> {
+    fn load_external_symbol(&self, name: &str) -> anyhow::Result<usize> {
         if let Some(addr) = self.get_function(name) {
             Ok(addr as usize)
         } else {
@@ -712,21 +737,36 @@ impl<'data> Coffee<'data> {
         }
     }
 
-    pub fn execute(&mut self) -> anyhow::Result<()> {
+    pub fn execute(&mut self, args: Vec<&str>) -> anyhow::Result<()> {
+
+        self.map_data()?;
+        self.reloc_symbols()?;
+
         for sym in self.symtab.iter() {
             if sym.st_symtype() != abi::STT_FUNC {
                 continue;
             }
             let sym_name = self.strtab.get(sym.st_name as usize)?;
+            debug!("Symbol: {}", sym_name);
             if sym_name == "go" {
-                let (addr, _) = self.get_symbol_addr(&sym)?;
+
+                let section = self.sections.get(sym.st_shndx as usize).unwrap();
+                let addr = section.start_address + sym.st_value as usize;
+
                 debug!("go function found: {:x}", addr);
                 let _section = self.sections.get(sym.st_shndx as usize).unwrap();
 
-                let func = unsafe { std::mem::transmute::<_, fn() -> u64>(addr) };
+                let func: GoFunc = unsafe { std::mem::transmute(addr) };
+                
+                let mut argv = Vec::new();
+                argv.push("coffee\0".as_ptr() as *const c_char);
+                
+                for arg in args.iter() {
+                    argv.push(arg.as_ptr() as *const c_char);
+                }
 
                 // sleep(Duration::from_secs(2));
-                let ret = func();
+                let ret = func(argv.len() as i32, argv.as_ptr());
 
                 debug!("main return: {:x}", ret);
                 break;

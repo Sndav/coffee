@@ -29,11 +29,6 @@ impl<'data> Coffee<'data> {
     pub fn get_function(&self, name: &str) -> Option<*const c_void> {
         self.func_table.get(name)
     }
-
-    pub fn register_functions(&mut self) {
-        self.register_function("println", println as *const c_void);
-        self.register_function("debugln", debugln as *const c_void);
-    }
 }
 
 pub extern "C" fn debugln(inp: *const c_char) {
