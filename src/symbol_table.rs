@@ -1,15 +1,11 @@
 use crate::coffee::Coffee;
-use log::debug;
-use std::{
-    collections::HashMap,
-    ffi::{c_char, c_void},
-};
+use std::{collections::HashMap, ffi::c_void};
 
-pub struct FunctionTable(HashMap<String, *const c_void>);
+pub struct CustomSymbolTable(HashMap<String, *const c_void>);
 
-impl FunctionTable {
+impl CustomSymbolTable {
     pub fn new() -> Self {
-        FunctionTable(HashMap::new())
+        CustomSymbolTable(HashMap::new())
     }
 
     pub fn add(&mut self, name: String, addr: *const c_void) {
@@ -22,15 +18,16 @@ impl FunctionTable {
 }
 
 impl<'data> Coffee<'data> {
-    pub fn register_function(&mut self, name: &str, addr: *const c_void) {
-        self.func_table.add(name.to_string(), addr);
+    pub fn register_symbol(&mut self, name: &str, addr: *const c_void) {
+        self.symbol_table.add(name.to_string(), addr);
     }
 
-    pub fn get_function(&self, name: &str) -> Option<*const c_void> {
-        self.func_table.get(name)
+    pub(crate) fn lookup_symbol(&self, name: &str) -> Option<*const c_void> {
+        self.symbol_table.get(name)
     }
 }
 
+#[cfg(test)]
 pub extern "C" fn debugln(inp: *const c_char) {
     let c_str = unsafe {
         assert!(!inp.is_null());
@@ -39,6 +36,7 @@ pub extern "C" fn debugln(inp: *const c_char) {
     debug!("{}", c_str.to_str().unwrap());
 }
 
+#[cfg(test)]
 pub extern "C" fn println(inp: *const c_char) {
     let c_str = unsafe {
         assert!(!inp.is_null());

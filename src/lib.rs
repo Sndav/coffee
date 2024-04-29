@@ -1,5 +1,7 @@
 mod coffee;
-mod function_table;
+mod symbol_table;
+
+#[cfg(test)]
 mod utils;
 mod elf_const;
 

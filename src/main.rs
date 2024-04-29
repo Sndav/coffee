@@ -1,5 +1,5 @@
 mod coffee;
-mod function_table;
+mod symbol_table;
 mod utils;
 
 mod elf_const;
@@ -22,7 +22,7 @@ fn execute_obj(path: &str) -> anyhow::Result<()> {
     let file_data = fs::read(obj_path)?;
 
     let mut coffee = Coffee::new(&file_data)?;
-    coffee.register_function("hello_world", hello_world as *const c_void);
+    coffee.register_symbol("hello_world", hello_world as *const c_void);
     
     let args = vec![
         "coffee\0",

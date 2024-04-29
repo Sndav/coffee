@@ -1,30 +1,29 @@
-use std::{env, ffi::c_void, ptr};
 use std::collections::HashMap;
-use std::ffi::CString;
 use std::mem::size_of;
+use std::{env, ffi::c_void, ptr};
 
 use anyhow::bail;
+use elf::abi::{
+    R_ARM_CALL, R_ARM_JUMP24, SHN_UNDEF, SHT_LOPROC, SHT_NOBITS, SHT_PROGBITS,
+    SHT_REL, SHT_RELA,
+};
+use elf::relocation::Rel;
 use elf::{
     abi,
-    ElfBytes,
     endian::AnyEndian,
     relocation::Rela,
     section::{SectionHeader, SectionHeaderTable},
     string_table::StringTable,
-    symbol::{Symbol, SymbolTable},
+    symbol::SymbolTable,
+    ElfBytes,
 };
-use elf::abi::{
-    R_AARCH64_CALL26, R_AARCH64_JUMP26, R_ARM_CALL, R_ARM_JUMP24, R_X86_64_32, SHF_INFO_LINK,
-    SHN_UNDEF, SHT_LOPROC, SHT_NOBITS, SHT_PROGBITS, SHT_REL, SHT_RELA,
-};
-use elf::relocation::Rel;
 use libc::{c_char, mmap};
 use log::debug;
 use nix::errno::Errno;
 use nix::libc::{PROT_EXEC, PROT_READ, PROT_WRITE};
 
-use crate::{elf_const, function_table::{FunctionTable}};
 use crate::elf_const::R_386_GOTOFF;
+use crate::{elf_const, symbol_table::CustomSymbolTable};
 
 const MAX_NUM_EXTERNAL_FUNCTIONS: usize = 256;
 const PAGE_SIZE: usize = 4096;
@@ -47,15 +46,8 @@ pub struct Coffee<'data> {
     // string table
     symtab: SymbolTable<'data, AnyEndian>,
     // symbol table
-    pub(crate) func_table: FunctionTable,
+    pub(crate) symbol_table: CustomSymbolTable,
 
-    thunk_trampoline: Vec<u8>,
-    // thunk trampoline
-    thunk_offset: usize, // thunk offset
-
-    plt_table: HashMap<usize, u32>,
-    // PLT table
-    plt_ptr: usize, // PLT table start address
 
     got_table: HashMap<usize, u32>,
     // GOT table
@@ -184,48 +176,10 @@ impl<'data> Coffee<'data> {
 
         let sh_strtab = sh_strtab.unwrap();
 
-        let thunk_trampoline = if cfg!(target_arch = "x86_64") {
-            vec![
-                0x48, 0xb8, // mov rax, imm64
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xe0, // jmp rax
-                0, 0, 0, 0, // padding to 16
-            ]
-        } else if cfg!(target_arch = "x86") {
-            vec![
-                0x68, // mov eax, imm32
-                0x00, 0x00, 0x00, 0x00, 0xff, 0xe0, // jmp eax
-                0x00, // padding to 8
-            ]
-        } else if cfg!(target_arch = "aarch64") {
-            vec![
-                0x50, 0x00, 0x00, 0x58, // ldr x16, #8
-                0x00, 0x02, 0x1f, 0xd6, // br x16
-                0, 0, 0, 0, 0, 0, 0, 0,
-            ]
-        } else if cfg!(target_arch = "arm") {
-            vec![
-                0x00, 0xc0, 0x9f, 0xe5, // ldr r12, [pc] ; pc points two instructions ahead
-                0x1c, 0xff, 0x2f, 0xe1, // bx r12
-                0, 0, 0, 0,
-            ]
-        } else {
-            bail!("unsupported target arch");
-        };
-
-        let thunk_offset = if cfg!(target_arch = "x86_64") {
-            2
-        } else if cfg!(target_arch = "x86") {
-            1
-        } else if cfg!(target_arch = "aarch64") | cfg!(target_arch = "arm") {
-            8
-        } else {
-            bail!("unsupported target arch");
-        };
-
         let mem_pool = unsafe {
             mmap(
                 std::ptr::null_mut(),
-                MAX_SECTION_SIZE * (2 + shdrs.len()), // need page for got and plt
+                MAX_SECTION_SIZE * (1 + shdrs.len()), // need page for got
                 PROT_READ | PROT_WRITE | PROT_EXEC,
                 libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
                 -1,
@@ -246,17 +200,13 @@ impl<'data> Coffee<'data> {
             sh_strtab,
             strtab,
             symtab,
-            thunk_trampoline,
-            thunk_offset,
 
             mem_pool,
-            plt_ptr: mem_pool as usize,
-            plt_table: HashMap::new(),
-            got_ptr: mem_pool as usize + MAX_SECTION_SIZE,
+            got_ptr: mem_pool as usize,
             got_table: HashMap::new(),
-            map_offset: MAX_SECTION_SIZE * 2,
+            map_offset: MAX_SECTION_SIZE,
 
-            func_table: FunctionTable::new(),
+            symbol_table: CustomSymbolTable::new(),
             libc_handle: unsafe { libc::dlopen("libc.so.6\x00".as_ptr() as _, libc::RTLD_LAZY) },
         })
     }
@@ -267,14 +217,10 @@ impl<'data> Coffee<'data> {
         addr as *mut c_void
     }
 
-
     fn get_got_func_ptr(&mut self, func_ptr: usize) -> anyhow::Result<u32> {
         let got_entry = match self.got_table.get(&func_ptr) {
             Some(got_entry) => *got_entry,
             None => {
-
-                let plt_entry = self.get_plt_func_ptr(func_ptr)?;
-                let plt_entry_addr = self.plt_ptr + (plt_entry as usize * self.thunk_trampoline.len());
 
                 let got_entry = self.got_table.len() as u32;
                 if got_entry >= MAX_NUM_EXTERNAL_FUNCTIONS as u32 {
@@ -286,45 +232,14 @@ impl<'data> Coffee<'data> {
                 let got_entry_addr = self.got_ptr + got_offset;
 
                 unsafe {
-                    ptr::write_unaligned(got_entry_addr as *mut usize, plt_entry_addr);
+                    ptr::write_unaligned(got_entry_addr as *mut usize, func_ptr);
                 }
 
                 got_entry
             }
         };
-        return Ok(got_entry);
+        Ok(got_entry)
     }
-
-    fn get_plt_func_ptr(&mut self, func_ptr: usize) -> anyhow::Result<u32> {
-        let plt_entry = match self.plt_table.get(&func_ptr) {
-            Some(plt_entry) => *plt_entry,
-            None => {
-                let plt_entry = self.plt_table.len() as u32;
-                if plt_entry >= MAX_NUM_EXTERNAL_FUNCTIONS as u32 {
-                    bail!("too many external functions")
-                }
-                self.plt_table.insert(func_ptr, plt_entry);
-
-                let plt_offset = plt_entry as usize * self.thunk_trampoline.len();
-                let plt_entry_addr = self.plt_ptr + plt_offset;
-                let mut trampline = self.thunk_trampoline.clone();
-
-                trampline[self.thunk_offset..self.thunk_offset + size_of::<usize>()]
-                    .copy_from_slice(&(func_ptr.to_le_bytes())); // write function address to trampoline
-
-                unsafe {
-                    ptr::copy_nonoverlapping(
-                        trampline.as_ptr(),
-                        plt_entry_addr as *mut u8,
-                        trampline.len(),
-                    );
-                }
-                plt_entry
-            }
-        };
-        return Ok(plt_entry);
-    }
-
 
 
     fn map_data(&mut self) -> anyhow::Result<()> {
@@ -442,7 +357,7 @@ impl<'data> Coffee<'data> {
     }
 
     fn reloc_symbols(&mut self) -> anyhow::Result<()> {
-        let mut sections = self.sections.clone();
+        let sections = self.sections.clone();
         for section in sections.iter() {
             if section.reloc.is_empty() {
                 continue;
@@ -456,10 +371,8 @@ impl<'data> Coffee<'data> {
                 let sym_name = self.strtab.get(sym.st_name as usize)?;
                 let r_type = reloc.r_type();
                 let mut addr_s = st_shndx_section.start_address + sym.st_value as usize;
-                let mut got_entry = 0;
-                let mut plt_entry = 0;
+                let got_entry;
                 let mut got_entry_addr = 0;
-                let mut plt_entry_addr = 0;
 
                 debug!("Relocating Symbol: {}", sym_name);
                 debug!("\tSymbol Address: {:x}", addr_s);
@@ -469,32 +382,23 @@ impl<'data> Coffee<'data> {
                 debug!("\tOffset: {}", reloc.r_offset());
                 debug!("\tType: {}", r_type);
 
-
                 // Undefined symbol
                 if sym.st_shndx == SHN_UNDEF {
-
                     debug!("\tMode: External Function");
                     let func_ptr = self.load_external_symbol(sym_name)?;
                     debug!("\t\tFunction Address: {:x}", func_ptr);
 
                     // Map function address to GOT and PLT
                     got_entry = self.get_got_func_ptr(func_ptr)?;
-                    plt_entry = self.get_plt_func_ptr(func_ptr)?;
-
-                    plt_entry_addr = self.plt_ptr + (plt_entry as usize * self.thunk_trampoline.len());
                     got_entry_addr = self.got_ptr + (got_entry as usize * size_of::<usize>());
 
-                    debug!("\t\tPLT Entry: {:x}", plt_entry);
                     debug!("\t\tGOT Entry: {:x}", got_entry);
-                    debug!("\t\tPLT Entry Address: {:x}", plt_entry_addr);
                     debug!("\t\tGOT Entry Address: {:x}", got_entry_addr);
 
-                    addr_s = plt_entry_addr;
-
+                    addr_s = func_ptr;
                 }
 
-                if env::consts::ARCH == "aarch64"
-                {
+                if env::consts::ARCH == "aarch64" {
                     debug!("\tMode: AARCH64 SHF_INFO_LINK");
                     match r_type {
                         abi::R_AARCH64_ADR_PREL_PG_HI21 => {
@@ -528,11 +432,11 @@ impl<'data> Coffee<'data> {
                         }
                         abi::R_AARCH64_CALL26 | abi::R_AARCH64_JUMP26 => {
                             debug!("\tMode: R_AARCH64_CALL26 | R_AARCH64_JUMP26");
-                            let offset = ((plt_entry_addr as isize + addend - addr_p as isize)
+                            let offset = ((addr_s as isize + addend - addr_p as isize)
                                 as i32
                                 & 0x0fff_ffff)
                                 >> 2;
-                            let val = if r_type == R_AARCH64_CALL26 {
+                            let val = if r_type == abi::R_AARCH64_CALL26 {
                                 0x94000000 | offset as u32
                             } else {
                                 0x14000000 | offset as u32
@@ -723,9 +627,8 @@ impl<'data> Coffee<'data> {
         Ok(())
     }
 
-
     fn load_external_symbol(&self, name: &str) -> anyhow::Result<usize> {
-        if let Some(addr) = self.get_function(name) {
+        if let Some(addr) = self.lookup_symbol(name) {
             Ok(addr as usize)
         } else {
             // fallback to libc
@@ -738,7 +641,6 @@ impl<'data> Coffee<'data> {
     }
 
     pub fn execute(&mut self, args: Vec<&str>) -> anyhow::Result<()> {
-
         self.map_data()?;
         self.reloc_symbols()?;
 
@@ -749,7 +651,6 @@ impl<'data> Coffee<'data> {
             let sym_name = self.strtab.get(sym.st_name as usize)?;
             debug!("Symbol: {}", sym_name);
             if sym_name == "go" {
-
                 let section = self.sections.get(sym.st_shndx as usize).unwrap();
                 let addr = section.start_address + sym.st_value as usize;
 
@@ -757,10 +658,10 @@ impl<'data> Coffee<'data> {
                 let _section = self.sections.get(sym.st_shndx as usize).unwrap();
 
                 let func: GoFunc = unsafe { std::mem::transmute(addr) };
-                
+
                 let mut argv = Vec::new();
                 argv.push("coffee\0".as_ptr() as *const c_char);
-                
+
                 for arg in args.iter() {
                     argv.push(arg.as_ptr() as *const c_char);
                 }

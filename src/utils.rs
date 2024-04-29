@@ -1,5 +1,6 @@
 use std::ffi::c_void;
 
+#[cfg(test)]
 pub(crate) fn show_mem_hexdump(addr: *mut c_void, size: usize) -> anyhow::Result<()> {
     let arr = addr as *mut u8;
     for i in 0..size {
@@ -14,6 +15,8 @@ pub(crate) fn show_mem_hexdump(addr: *mut c_void, size: usize) -> anyhow::Result
     Ok(())
 }
 
+
+#[cfg(test)]
 pub(crate) fn hexdump(data: &[u8]) {
     let mut i = 0;
     while i < data.len() {
