@@ -176,10 +176,24 @@ impl<'data> Coffee<'data> {
 
         let sh_strtab = sh_strtab.unwrap();
 
+        let mut total_size = 0;
+
+        for shdr in shdrs.iter() {
+            if shdr.sh_type == SHT_PROGBITS
+                || shdr.sh_type == SHT_NOBITS
+                || shdr.sh_type == (SHT_PROGBITS | SHT_LOPROC)
+                && shdr.sh_size > 0 {
+                total_size += shdr.sh_size as usize;
+            }
+        }
+
+        total_size = total_size + PAGE_SIZE - (total_size % PAGE_SIZE);
+        total_size += MAX_SECTION_SIZE;
+
         let mem_pool = unsafe {
             mmap(
-                std::ptr::null_mut(),
-                MAX_SECTION_SIZE * (1 + shdrs.len()), // need page for got
+                ptr::null_mut(),
+                total_size, // need page for got
                 PROT_READ | PROT_WRITE | PROT_EXEC,
                 libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
                 -1,
@@ -317,7 +331,7 @@ impl<'data> Coffee<'data> {
                     Some(section) => section,
                     None => bail!("reloc section not found: {}", section_name),
                 };
-                origin_section.reloc_header = section_header.clone();
+                origin_section.reloc_header = section_header;
 
                 debug!(
                     "ENTRIES (Section: {}) for {}",
