@@ -4,8 +4,7 @@ use std::{env, ffi::c_void, ptr};
 
 use anyhow::bail;
 use elf::abi::{
-    R_ARM_CALL, R_ARM_JUMP24, SHN_UNDEF, SHT_LOPROC, SHT_NOBITS, SHT_PROGBITS,
-    SHT_REL, SHT_RELA,
+    R_ARM_CALL, R_ARM_JUMP24, SHN_UNDEF, SHT_LOPROC, SHT_NOBITS, SHT_PROGBITS, SHT_REL, SHT_RELA,
 };
 use elf::relocation::Rel;
 use elf::{
@@ -47,7 +46,6 @@ pub struct Coffee<'data> {
     symtab: SymbolTable<'data, AnyEndian>,
     // symbol table
     pub(crate) symbol_table: CustomSymbolTable,
-
 
     got_table: HashMap<usize, u32>,
     // GOT table
@@ -181,8 +179,8 @@ impl<'data> Coffee<'data> {
         for shdr in shdrs.iter() {
             if shdr.sh_type == SHT_PROGBITS
                 || shdr.sh_type == SHT_NOBITS
-                || shdr.sh_type == (SHT_PROGBITS | SHT_LOPROC)
-                && shdr.sh_size > 0 {
+                || shdr.sh_type == (SHT_PROGBITS | SHT_LOPROC) && shdr.sh_size > 0
+            {
                 total_size += shdr.sh_size as usize;
             }
         }
@@ -235,7 +233,6 @@ impl<'data> Coffee<'data> {
         let got_entry = match self.got_table.get(&func_ptr) {
             Some(got_entry) => *got_entry,
             None => {
-
                 let got_entry = self.got_table.len() as u32;
                 if got_entry >= MAX_NUM_EXTERNAL_FUNCTIONS as u32 {
                     bail!("too many external functions");
@@ -254,7 +251,6 @@ impl<'data> Coffee<'data> {
         };
         Ok(got_entry)
     }
-
 
     fn map_data(&mut self) -> anyhow::Result<()> {
         debug!("Number of Sections: {}", self.sh_table.len());
@@ -446,8 +442,7 @@ impl<'data> Coffee<'data> {
                         }
                         abi::R_AARCH64_CALL26 | abi::R_AARCH64_JUMP26 => {
                             debug!("\tMode: R_AARCH64_CALL26 | R_AARCH64_JUMP26");
-                            let offset = ((addr_s as isize + addend - addr_p as isize)
-                                as i32
+                            let offset = ((addr_s as isize + addend - addr_p as isize) as i32
                                 & 0x0fff_ffff)
                                 >> 2;
                             let val = if r_type == abi::R_AARCH64_CALL26 {
@@ -654,7 +649,7 @@ impl<'data> Coffee<'data> {
         }
     }
 
-    pub fn execute(&mut self, args: Vec<&str>) -> anyhow::Result<()> {
+    pub fn execute(&mut self, args: Vec<String>) -> anyhow::Result<()> {
         self.map_data()?;
         self.reloc_symbols()?;
 

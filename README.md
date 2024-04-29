@@ -64,7 +64,7 @@ pub extern "C" fn hello_world() {
 
 ```rust
 let mut coffee = Coffee::new(&file_data)?;
-coffee.register_function("hello_world", hello_world as *const c_void);
+coffee.register_symbol("hello_world", hello_world as *const c_void);
 ```
 
 3. Define the function prototype in C source file

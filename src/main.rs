@@ -25,8 +25,8 @@ fn execute_obj(path: &str) -> anyhow::Result<()> {
     coffee.register_symbol("hello_world", hello_world as *const c_void);
     
     let args = vec![
-        "coffee\0",
-        "hello_world\0",
+        "coffee\0".to_string(),
+        "hello_world\0".to_string(),
     ];
     coffee.execute(args)?;
     Ok(())
