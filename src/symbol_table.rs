@@ -26,21 +26,3 @@ impl<'data> Coffee<'data> {
         self.symbol_table.get(name)
     }
 }
-
-#[cfg(test)]
-pub extern "C" fn debugln(inp: *const c_char) {
-    let c_str = unsafe {
-        assert!(!inp.is_null());
-        std::ffi::CStr::from_ptr(inp)
-    };
-    debug!("{}", c_str.to_str().unwrap());
-}
-
-#[cfg(test)]
-pub extern "C" fn println(inp: *const c_char) {
-    let c_str = unsafe {
-        assert!(!inp.is_null());
-        std::ffi::CStr::from_ptr(inp)
-    };
-    println!("{}", c_str.to_str().unwrap());
-}
